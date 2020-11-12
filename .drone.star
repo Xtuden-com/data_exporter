@@ -70,10 +70,8 @@ config = {
 }
 
 def main(ctx):
-	initial = initialPipelines(ctx)
 
-	before = beforePipelines(ctx)
-	dependsOn(initial, before)
+	before = beforePipelines()
 
 	coverageTests = coveragePipelines(ctx)
 	if (coverageTests == False):
@@ -96,13 +94,10 @@ def main(ctx):
 	after = afterPipelines(ctx)
 	dependsOn(afterCoverageTests + stages, after)
 
-	return initial + before + coverageTests + afterCoverageTests + stages + after
+	return before + coverageTests + afterCoverageTests + stages + after
 
-def initialPipelines(ctx):
-	return dependencies(ctx)
-
-def beforePipelines(ctx):
-	return codestyle() + changelog(ctx) + phpstan() + phan()
+def beforePipelines():
+	return codestyle() + jscodestyle() + phpstan() + phan()
 
 def coveragePipelines(ctx):
 	# All pipelines that might have coverage or other test analysis reported
@@ -133,77 +128,6 @@ def afterPipelines(ctx):
 	return [
 		notify()
 	]
-
-def dependencies(ctx):
-	pipelines = []
-
-	if 'dependencies' not in config:
-		return pipelines
-
-	default = {
-		'phpVersions': ['7.2'],
-	}
-
-	if 'defaults' in config:
-		if 'dependencies' in config['defaults']:
-			for item in config['defaults']['dependencies']:
-				default[item] = config['defaults']['dependencies'][item]
-
-	dependenciesConfig = config['dependencies']
-
-	if type(dependenciesConfig) == "bool":
-		if dependenciesConfig:
-			# the config has 'dependencies' true, so specify an empty dict that will get the defaults
-			dependenciesConfig = {}
-		else:
-			return pipelines
-
-	if len(dependenciesConfig) == 0:
-		# 'dependencies' is an empty dict, so specify a single section that will get the defaults
-		dependenciesConfig = {'doDefault': {}}
-
-	for category, matrix in dependenciesConfig.items():
-		params = {}
-		for item in default:
-			params[item] = matrix[item] if item in matrix else default[item]
-
-		for phpVersion in params['phpVersions']:
-			name = 'install-dependencies-php%s' % phpVersion
-
-			result = {
-				'kind': 'pipeline',
-				'type': 'docker',
-				'name': name,
-				'workspace' : {
-					'base': '/drone',
-					'path': 'src'
-				},
-				'steps':
-					cacheRestore() +
-					composerInstall(phpVersion) +
-					vendorbinCodestyle(phpVersion) +
-					vendorbinCodesniffer(phpVersion) +
-					vendorbinPhan(phpVersion) +
-					vendorbinPhpstan(phpVersion) +
-					vendorbinBehat() +
-					yarnInstall(phpVersion) +
-					cacheRebuildOnEventPush() +
-					cacheFlushOnEventPush(),
-				'depends_on': [],
-				'trigger': {
-					'ref': [
-						'refs/pull/**',
-						'refs/tags/**'
-					]
-				}
-			}
-
-			for branch in config['branches']:
-				result['trigger']['ref'].append('refs/heads/%s' % branch)
-
-			pipelines.append(result)
-
-	return pipelines
 
 def codestyle():
 	pipelines = []
