@@ -70,22 +70,22 @@ config = {
 }
 
 def main(ctx):
-    initial = initialPipelines(ctx)
+  initial = initialPipelines(ctx)
 
-	before = beforePipelines(ctx)
-	dependsOn(initial, before)
+  before = beforePipelines(ctx)
+  dependsOn(initial, before)
 
-	coverageTests = coveragePipelines(ctx)
-    	if (coverageTests == False):
-    		print('Errors detected in coveragePipelines. Review messages above.')
-    		return []
+  coverageTests = coveragePipelines(ctx)
+  if (coverageTests == False):
+  	print('Errors detected in coveragePipelines. Review messages above.')
+	return []
 
-    	dependsOn(before, coverageTests)
+  dependsOn(before, coverageTests)
 
-	stages = stagePipelines(ctx)
-	if (stages == False):
-		print('Errors detected in stagePipelines. Review messages above.')
-		return []
+  stages = stagePipelines(ctx)
+  if (stages == False):
+	print('Errors detected in stagePipelines. Review messages above.')
+	return []
 
 	dependsOn(before, stages)
 
@@ -133,6 +133,77 @@ def afterPipelines():
 	return [
 		notify()
 	]
+
+def dependencies(ctx):
+	pipelines = []
+
+	if 'dependencies' not in config:
+		return pipelines
+
+	default = {
+		'phpVersions': ['7.2'],
+	}
+
+	if 'defaults' in config:
+		if 'dependencies' in config['defaults']:
+			for item in config['defaults']['dependencies']:
+				default[item] = config['defaults']['dependencies'][item]
+
+	dependenciesConfig = config['dependencies']
+
+	if type(dependenciesConfig) == "bool":
+		if dependenciesConfig:
+			# the config has 'dependencies' true, so specify an empty dict that will get the defaults
+			dependenciesConfig = {}
+		else:
+			return pipelines
+
+	if len(dependenciesConfig) == 0:
+		# 'dependencies' is an empty dict, so specify a single section that will get the defaults
+		dependenciesConfig = {'doDefault': {}}
+
+	for category, matrix in dependenciesConfig.items():
+		params = {}
+		for item in default:
+			params[item] = matrix[item] if item in matrix else default[item]
+
+		for phpVersion in params['phpVersions']:
+			name = 'install-dependencies-php%s' % phpVersion
+
+			result = {
+				'kind': 'pipeline',
+				'type': 'docker',
+				'name': name,
+				'workspace' : {
+					'base': '/drone',
+					'path': 'src'
+				},
+				'steps':
+					cacheRestore() +
+					composerInstall(phpVersion) +
+					vendorbinCodestyle(phpVersion) +
+					vendorbinCodesniffer(phpVersion) +
+					vendorbinPhan(phpVersion) +
+					vendorbinPhpstan(phpVersion) +
+					vendorbinBehat() +
+					yarnInstall(phpVersion) +
+					cacheRebuildOnEventPush() +
+					cacheFlushOnEventPush(),
+				'depends_on': [],
+				'trigger': {
+					'ref': [
+						'refs/pull/**',
+						'refs/tags/**'
+					]
+				}
+			}
+
+			for branch in config['branches']:
+				result['trigger']['ref'].append('refs/heads/%s' % branch)
+
+			pipelines.append(result)
+
+	return pipelines
 
 def codestyle():
 	pipelines = []
@@ -243,6 +314,106 @@ def jscodestyle():
 
 	for branch in config['branches']:
 		result['trigger']['ref'].append('refs/heads/%s' % branch)
+
+	pipelines.append(result)
+
+	return pipelines
+
+def changelog(ctx):
+	repo_slug = ctx.build.source_repo if ctx.build.source_repo else ctx.repo.slug
+	pipelines = []
+
+	result = {
+		'kind': 'pipeline',
+		'type': 'docker',
+		'name': 'changelog',
+		'clone': {
+			'disable': True,
+		},
+		'steps':
+			[
+				{
+					'name': 'clone',
+					'image': 'plugins/git-action:1',
+					'pull': 'always',
+					'settings': {
+						'actions': [
+							'clone',
+						],
+						'remote': 'https://github.com/%s' % (repo_slug),
+						'branch': ctx.build.source if ctx.build.event == 'pull_request' else 'master',
+						'path': '/drone/src',
+						'netrc_machine': 'github.com',
+						'netrc_username': {
+							'from_secret': 'github_username',
+						},
+						'netrc_password': {
+							'from_secret': 'github_token',
+						},
+					},
+				},
+				{
+					'name': 'generate',
+					'image': 'toolhippie/calens:latest',
+					'pull': 'always',
+					'commands': [
+						'calens >| CHANGELOG.md',
+					],
+				},
+				{
+					'name': 'diff',
+					'image': 'owncloud/alpine:latest',
+					'pull': 'always',
+					'commands': [
+						'git diff',
+					],
+				},
+				{
+					'name': 'output',
+					'image': 'toolhippie/calens:latest',
+					'pull': 'always',
+					'commands': [
+						'cat CHANGELOG.md',
+					],
+				},
+				{
+					'name': 'publish',
+					'image': 'plugins/git-action:1',
+					'pull': 'always',
+					'settings': {
+						'actions': [
+							'commit',
+							'push',
+						],
+						'message': 'Automated changelog update [skip ci]',
+						'branch': 'master',
+						'author_email': 'devops@owncloud.com',
+						'author_name': 'ownClouders',
+						'netrc_machine': 'github.com',
+						'netrc_username': {
+							'from_secret': 'github_username',
+						},
+						'netrc_password': {
+							'from_secret': 'github_token',
+						},
+					},
+					'when': {
+						'ref': {
+							'exclude': [
+								'refs/pull/**',
+							],
+						},
+					},
+				},
+			],
+		'depends_on': [],
+		'trigger': {
+			'ref': [
+				'refs/heads/master',
+				'refs/pull/**',
+			],
+		},
+	}
 
 	pipelines.append(result)
 
@@ -394,6 +565,260 @@ def phan():
 				result['trigger']['ref'].append('refs/heads/%s' % branch)
 
 			pipelines.append(result)
+
+	return pipelines
+
+def litmus():
+	pipelines = []
+
+	if 'litmus' not in config:
+		return pipelines
+
+	default = {
+		'phpVersions': ['7.2', '7.3', '7.4'],
+		'logLevel': '2',
+		'useHttps': True,
+	}
+
+	if 'defaults' in config:
+		if 'litmus' in config['defaults']:
+			for item in config['defaults']['litmus']:
+				default[item] = config['defaults']['litmus'][item]
+
+	litmusConfig = config['litmus']
+
+	if type(litmusConfig) == "bool":
+		if litmusConfig:
+			# the config has 'litmus' true, so specify an empty dict that will get the defaults
+			litmusConfig = {}
+		else:
+			return pipelines
+
+	if len(litmusConfig) == 0:
+		# 'litmus' is an empty dict, so specify a single section that will get the defaults
+		litmusConfig = {'doDefault': {}}
+
+	for category, matrix in litmusConfig.items():
+		params = {}
+		for item in default:
+			params[item] = matrix[item] if item in matrix else default[item]
+
+		for phpVersion in params['phpVersions']:
+			name = 'litmus-php%s' % phpVersion
+			db = 'mariadb:10.2'
+			image = 'owncloud/litmus:latest'
+			environment = {
+				'LITMUS_PASSWORD': 'admin',
+				'LITMUS_USERNAME': 'admin',
+				'TESTS': 'basic copymove props locks http',
+			}
+			litmusCommand = '/usr/local/bin/litmus-wrapper'
+
+			result = {
+				'kind': 'pipeline',
+				'type': 'docker',
+				'name': name,
+				'workspace' : {
+					'base': '/drone',
+					'path': 'src'
+				},
+				'steps':
+					cacheRestore() +
+					composerInstall(phpVersion) +
+					yarnInstall(phpVersion) +
+					installServer(phpVersion, db, params['logLevel'], params['useHttps']) +
+					setupLocalStorage(phpVersion) +
+					fixPermissions(phpVersion, False) +
+					createShare(phpVersion) +
+					owncloudLog('server', 'src') +
+					[
+						{
+							'name': 'old-endpoint',
+							'image': image,
+							'pull': 'always',
+							'environment': environment,
+							'commands': [
+								'source .env',
+								'export LITMUS_URL="https://server/remote.php/webdav"',
+								litmusCommand,
+							]
+						},
+						{
+							'name': 'new-endpoint',
+							'image': image,
+							'pull': 'always',
+							'environment': environment,
+							'commands': [
+								'source .env',
+								'export LITMUS_URL="https://server/remote.php/dav/files/admin"',
+								litmusCommand,
+							]
+						},
+						{
+							'name': 'new-mount',
+							'image': image,
+							'pull': 'always',
+							'environment': environment,
+							'commands': [
+								'source .env',
+								'export LITMUS_URL="https://server/remote.php/dav/files/admin/local_storage/"',
+								litmusCommand,
+							]
+						},
+						{
+							'name': 'old-mount',
+							'image': image,
+							'pull': 'always',
+							'environment': environment,
+							'commands': [
+								'source .env',
+								'export LITMUS_URL="https://server/remote.php/webdav/local_storage/"',
+								litmusCommand,
+							]
+						},
+						{
+							'name': 'new-shared',
+							'image': image,
+							'pull': 'always',
+							'environment': environment,
+							'commands': [
+								'source .env',
+								'export LITMUS_URL="https://server/remote.php/dav/files/admin/new_folder/"',
+								litmusCommand,
+							]
+						},
+						{
+							'name': 'old-shared',
+							'image': image,
+							'pull': 'always',
+							'environment': environment,
+							'commands': [
+								'source .env',
+								'export LITMUS_URL="https://server/remote.php/webdav/new_folder/"',
+								litmusCommand,
+							]
+						},
+						{
+							'name': 'public-share',
+							'image': image,
+							'pull': 'always',
+							'environment': {
+								'LITMUS_PASSWORD': 'admin',
+								'LITMUS_USERNAME': 'admin',
+								'TESTS': 'basic copymove http',
+							},
+							'commands': [
+								'source .env',
+								'export LITMUS_URL=\'https://server/remote.php/dav/public-files/\'$PUBLIC_TOKEN',
+								litmusCommand,
+							]
+						},
+					],
+				'services':
+					databaseService(db) +
+					owncloudService(phpVersion, 'server', '/drone/src', params['useHttps']),
+				'depends_on': [],
+				'trigger': {
+					'ref': [
+						'refs/pull/**',
+						'refs/tags/**'
+					]
+				}
+			}
+
+			pipelines.append(result)
+
+	return pipelines
+
+def dav():
+	pipelines = []
+
+	if 'dav' not in config:
+		return pipelines
+
+	default = {
+		'phpVersions': ['7.2', '7.3', '7.4'],
+		'logLevel': '2'
+	}
+
+	if 'defaults' in config:
+		if 'dav' in config['defaults']:
+			for item in config['defaults']['dav']:
+				default[item] = config['defaults']['dav'][item]
+
+	davConfig = config['dav']
+
+	if type(davConfig) == "bool":
+		if davConfig:
+			# the config has 'dav' true, so specify an empty dict that will get the defaults
+			davConfig = {}
+		else:
+			return pipelines
+
+	if len(davConfig) == 0:
+		# 'dav' is an empty dict, so specify a single section that will get the defaults
+		davConfig = {'doDefault': {}}
+
+	for category, matrix in davConfig.items():
+		params = {}
+		for item in default:
+			params[item] = matrix[item] if item in matrix else default[item]
+
+		for phpVersion in params['phpVersions']:
+			for davType in ['caldav-new', 'caldav-old', 'carddav-new', 'carddav-old']:
+				name = '%s-php%s' % (davType, phpVersion)
+				db = 'mariadb:10.2'
+
+				if (davType == 'caldav-new'):
+					scriptPath = 'apps/dav/tests/ci/caldav'
+
+				if (davType == 'caldav-old'):
+					scriptPath = 'apps/dav/tests/ci/caldav-old-endpoint'
+
+				if (davType == 'carddav-new'):
+					scriptPath = 'apps/dav/tests/ci/carddav'
+
+				if (davType == 'carddav-old'):
+					scriptPath = 'apps/dav/tests/ci/carddav-old-endpoint'
+
+				result = {
+					'kind': 'pipeline',
+					'type': 'docker',
+					'name': name,
+					'workspace' : {
+						'base': '/drone',
+						'path': 'src'
+					},
+					'steps':
+						cacheRestore() +
+						composerInstall(phpVersion) +
+						yarnInstall(phpVersion) +
+						installServer(phpVersion, db, params['logLevel']) +
+						davInstall(phpVersion, scriptPath) +
+						fixPermissions(phpVersion, False) +
+						owncloudLog('server', 'src') +
+						[
+							{
+								'name': 'dav-test',
+								'image': 'owncloudci/php:%s' % phpVersion,
+								'pull': 'always',
+								'commands': [
+									'bash %s/script.sh' % scriptPath,
+								]
+							},
+						],
+					'services':
+						databaseService(db),
+					'depends_on': [],
+					'trigger': {
+						'ref': [
+							'refs/pull/**',
+							'refs/tags/**'
+						]
+					}
+				}
+
+				pipelines.append(result)
 
 	return pipelines
 
@@ -561,7 +986,7 @@ def javascript(ctx):
 			'image': 'plugins/s3',
 			'pull': 'always',
 			'settings': {
-				endpoint': {
+				'endpoint': {
                 	'from_secret': 'cache_s3_endpoint'
              	},
               	'bucket': 'cache',
@@ -601,6 +1026,7 @@ def phptests(ctx, testType):
 		'logLevel': '2',
 		'cephS3': False,
 		'scalityS3': False,
+		'externalTypes': ['none'],
 		'extraSetup': [],
 		'extraServices': [],
 		'extraEnvironment': {},
@@ -671,135 +1097,137 @@ def phptests(ctx, testType):
 					command = 'make test-php-integration'
 
 			for db in params['databases']:
-				keyString = '-' + category if params['includeKeyInMatrixName'] else ''
-				name = '%s%s-php%s-%s' % (testType, keyString, phpVersion, db.replace(":", ""))
-				maxLength = 50
-				nameLength = len(name)
-				if nameLength > maxLength:
-					print("Error: generated phpunit stage name of length", nameLength, "is not supported. The maximum length is " + str(maxLength) + ".", name)
-					errorFound = True
+				for externalType in params['externalTypes']:
+					keyString = '-' + category if params['includeKeyInMatrixName'] else ''
+					filesExternalType = externalType if externalType != 'none' else ''
+					name = '%s%s-php%s-%s' % (testType, keyString, phpVersion, db.replace(":", ""))
+					maxLength = 50
+					nameLength = len(name)
+					if nameLength > maxLength:
+						print("Error: generated phpunit stage name of length", nameLength, "is not supported. The maximum length is " + str(maxLength) + ".", name)
+						errorFound = True
 
-				if (filesExternalType == ''):
-					# for the regular unit test runs, the clover coverage results are in a file named like:
-					# autotest-clover-sqlite.xml
-					coverageFileNameStart = 'autotest'
-					extraCoverageRenameCommand = []
-					extraCoverage = False
-				else:
-					# for the files-external unit test runs, the clover coverage results are in 2 files named like:
-					# autotest-external-clover-sqlite.xml
-					# autotest-external-clover-sqlite-samba.xml
-					coverageFileNameStart = 'autotest-external'
-					extraCoverageRenameCommand = [
-						'mv tests/output/coverage/%s-clover-%s-%s.xml tests/output/coverage/clover-%s-%s.xml' % (coverageFileNameStart, getDbName(db), externalType, name, externalType)
-					]
-					extraCoverage = True
+					if (filesExternalType == ''):
+						# for the regular unit test runs, the clover coverage results are in a file named like:
+						# autotest-clover-sqlite.xml
+						coverageFileNameStart = 'autotest'
+						extraCoverageRenameCommand = []
+						extraCoverage = False
+					else:
+						# for the files-external unit test runs, the clover coverage results are in 2 files named like:
+						# autotest-external-clover-sqlite.xml
+						# autotest-external-clover-sqlite-samba.xml
+						coverageFileNameStart = 'autotest-external'
+						extraCoverageRenameCommand = [
+							'mv tests/output/coverage/%s-clover-%s-%s.xml tests/output/coverage/clover-%s-%s.xml' % (coverageFileNameStart, getDbName(db), externalType, name, externalType)
+						]
+						extraCoverage = True
 
-				result = {
-					'kind': 'pipeline',
-					'type': 'docker',
-					'name': name,
-					'workspace' : {
-						'base': '/var/www/owncloud',
-						'path': 'server/apps/%s' % config['app']
-					},
-					'steps':
-						installCore('daily-master-qa', db, False) +
-						installApp(phpVersion) +
-						installExtraApps(phpVersion, params['extraApps']) +
-						setupServerAndApp(phpVersion, params['logLevel']) +
-						setupCeph(params['cephS3']) +
-						setupScality(params['scalityS3']) +
-						params['extraSetup'] +
-					[
-						{
-							'name': '%s-tests' % testType,
+					result = {
+						'kind': 'pipeline',
+                        'type': 'docker',
+                        'name': name,
+                        'workspace' : {
+                            'base': '/var/www/owncloud',
+                            'path': 'server/apps/%s' % config['app']
+                        },
+                        'steps':
+                            installCore('daily-master-qa', db, False) +
+                            installApp(phpVersion) +
+                            installExtraApps(phpVersion, params['extraApps']) +
+                            setupServerAndApp(phpVersion, params['logLevel']) +
+                            setupCeph(params['cephS3']) +
+                            setupScality(params['scalityS3']) +
+                            params['extraSetup'] +
+                        [
+                            {
+                                'name': '%s-tests' % testType,
+                                'image': 'owncloudci/php:%s' % phpVersion,
+                                'pull': 'always',
+                                'environment': params['extraEnvironment'],
+                                'commands': params['extraCommandsBeforeTestRun'] + [
+                                    command
+                                ]
+                            }
+                        ] + params['extraTeardown'],
+                        'services':
+                            databaseService(db) +
+                            cephService(params['cephS3']) +
+                            scalityService(params['scalityS3']) +
+                            params['extraServices'],
+                        'depends_on': [],
+                        'trigger': {
+                            'ref': [
+                                'refs/pull/**',
+                                'refs/tags/**'
+                            ]
+                        }
+                    }
+
+					if params['coverage']:
+						result['steps'].append({
+							'name': 'coverage-rename',
 							'image': 'owncloudci/php:%s' % phpVersion,
 							'pull': 'always',
-							'environment': params['extraEnvironment'],
-							'commands': params['extraCommandsBeforeTestRun'] + [
-								command
-							]
-						}
-					] + params['extraTeardown'],
-					'services':
-						databaseService(db) +
-						cephService(params['cephS3']) +
-						scalityService(params['scalityS3']) +
-						params['extraServices'],
-					'depends_on': [],
-					'trigger': {
-						'ref': [
-							'refs/pull/**',
-							'refs/tags/**'
-						]
-					}
-				}
-
-				if params['coverage']:
-					result['steps'].append({
-						'name': 'coverage-rename'',
-						'image': 'owncloudci/php:%s' % phpVersion',
-						'pull': 'always',
-						'commands': [
-                        	'mv tests/output/coverage/%s-clover-%s.xml tests/output/coverage/clover-%s.xml' % (coverageFileNameStart, getDbName(db), name)
-                        ] + extraCoverageRenameCommand
-                        })
-                        result['steps'].append({
-                            'name': 'coverage-cache-1',
-                        	'image': 'plugins/s3',
-                        	'pull': 'always',
-						'settings': {
-                        	'endpoint': {
-                        		'from_secret': 'cache_s3_endpoint'
-                        	},
-                        	'bucket': 'cache',
-                        	'source': 'tests/output/coverage/clover-%s.xml'  % (name),
-                        	'target': '%s/%s/coverage' % (ctx.repo.slug, ctx.build.commit + '-${DRONE_BUILD_NUMBER}'),
-                        	'path_style': True,
-                        	'strip_prefix': 'tests/output/coverage',
-                        	'access_key': {
-                        	    'from_secret': 'cache_s3_access_key'
-                        	},
-                        	'secret_key': {
-                        	    'from_secret': 'cache_s3_secret_key'
+							'commands': [
+								'mv tests/output/coverage/%s-clover-%s.xml tests/output/coverage/clover-%s.xml' % (coverageFileNameStart, getDbName(db), name)
+							] + extraCoverageRenameCommand
+						})
+						result['steps'].append({
+							'name': 'coverage-cache-1',
+							'image': 'plugins/s3',
+							'pull': 'always',
+							'settings': {
+								'endpoint': {
+									'from_secret': 'cache_s3_endpoint'
+								},
+								'bucket': 'cache',
+								'source': 'tests/output/coverage/clover-%s.xml'  % (name),
+								'target': '%s/%s/coverage' % (ctx.repo.slug, ctx.build.commit + '-${DRONE_BUILD_NUMBER}'),
+								'path_style': True,
+								'strip_prefix': 'tests/output/coverage',
+								'access_key': {
+									'from_secret': 'cache_s3_access_key'
+								},
+								'secret_key': {
+									'from_secret': 'cache_s3_secret_key'
+								}
 							}
-						}
-					})
-					if extraCoverage:
-                        result['steps'].append({
-                            'name': 'coverage-cache-2',
-                            'image': 'plugins/s3',
-                            'pull': 'always',
-                            'settings': {
-                                'endpoint': {
-                                    'from_secret': 'cache_s3_endpoint'
-                                },
-                                'bucket': 'cache',
-                                'source': 'tests/output/coverage/clover-%s-%s.xml'  % (name, externalType),
-                                'target': '%s/%s/coverage' % (ctx.repo.slug, ctx.build.commit + '-${DRONE_BUILD_NUMBER}'),
-                                'path_style': True,
-                                'strip_prefix': 'tests/output/coverage',
-                                'access_key': {
-                                    'from_secret': 'cache_s3_access_key'
-                                },
-                                'secret_key': {
-                                    'from_secret': 'cache_s3_secret_key'
-                                }
-                            }
-                        })
+						})
+						if extraCoverage:
+							result['steps'].append({
+								'name': 'coverage-cache-2',
+								'image': 'plugins/s3',
+								'pull': 'always',
+								'settings': {
+									'endpoint': {
+										'from_secret': 'cache_s3_endpoint'
+									},
+									'bucket': 'cache',
+									'source': 'tests/output/coverage/clover-%s-%s.xml'  % (name, externalType),
+									'target': '%s/%s/coverage' % (ctx.repo.slug, ctx.build.commit + '-${DRONE_BUILD_NUMBER}'),
+									'path_style': True,
+									'strip_prefix': 'tests/output/coverage',
+									'access_key': {
+										'from_secret': 'cache_s3_access_key'
+									},
+									'secret_key': {
+										'from_secret': 'cache_s3_secret_key'
+									}
+								}
+							})
 
-				for branch in config['branches']:
-					result['trigger']['ref'].append('refs/heads/%s' % branch)
+					for branch in config['branches']:
+						result['trigger']['ref'].append('refs/heads/%s' % branch)
 
-				pipelines.append(result)
+					pipelines.append(result)
 
 	if errorFound:
 		return False
 
 	return pipelines
 
-def acceptance():
+def acceptance(ctx):
 	pipelines = []
 
 	if 'acceptance' not in config:
@@ -1428,6 +1856,140 @@ def cacheFlushOnEventPush():
 				'drone.owncloud.com'
 			],
 		}
+	}]
+
+def composerInstall(phpVersion):
+	return [{
+		'name': 'composer-install',
+		'image': 'owncloudci/php:%s' % phpVersion,
+		'pull': 'always',
+		'environment': {
+			'COMPOSER_HOME': '/drone/src/.cache/composer'
+		},
+		'commands': [
+			'make install-composer-deps'
+		]
+	}]
+
+def vendorbinCodestyle(phpVersion):
+    return [{
+        'name': 'vendorbin-codestyle',
+        'image': 'owncloudci/php:%s' % phpVersion,
+        'pull': 'always',
+        'environment': {
+            'COMPOSER_HOME': '/drone/src/.cache/composer'
+        },
+        'commands': [
+            'make vendor-bin-codestyle'
+        ]
+    }]
+
+def vendorbinCodesniffer(phpVersion):
+	return [{
+		'name': 'vendorbin-codesniffer',
+		'image': 'owncloudci/php:%s' % phpVersion,
+		'pull': 'always',
+		'environment': {
+			'COMPOSER_HOME': '/drone/src/.cache/composer'
+		},
+		'commands': [
+			'make vendor-bin-codesniffer'
+		]
+	}]
+
+def vendorbinPhan(phpVersion):
+	return [{
+		'name': 'vendorbin-phan',
+		'image': 'owncloudci/php:%s' % phpVersion,
+		'pull': 'always',
+		'environment': {
+			'COMPOSER_HOME': '/drone/src/.cache/composer'
+		},
+		'commands': [
+			'make vendor-bin-phan'
+		]
+	}]
+
+def vendorbinPhpstan(phpVersion):
+	return [{
+		'name': 'vendorbin-phpstan',
+		'image': 'owncloudci/php:%s' % phpVersion,
+		'pull': 'always',
+		'environment': {
+			'COMPOSER_HOME': '/drone/src/.cache/composer'
+		},
+		'commands': [
+			'make vendor-bin-phpstan'
+		]
+	}]
+
+def vendorbinBehat():
+	return [{
+		'name': 'vendorbin-behat',
+		'image': 'owncloudci/php:7.4',
+		'pull': 'always',
+		'environment': {
+			'COMPOSER_HOME': '/drone/src/.cache/composer'
+		},
+		'commands': [
+			'make vendor-bin-behat'
+		]
+	}]
+
+def yarnInstall(phpVersion):
+	return [{
+		'name': 'yarn-install',
+		'image': 'owncloudci/php:%s' % phpVersion,
+		'pull': 'always',
+		'environment': {
+			'NPM_CONFIG_CACHE': '/drone/src/.cache/npm',
+			'YARN_CACHE_FOLDER': '/drone/src/.cache/yarn',
+			'bower_storage__packages': '/drone/src/.cache/bower',
+		},
+		'commands': [
+			'make install-nodejs-deps'
+		]
+	}]
+
+def davInstall(phpVersion, scriptPath):
+	return [{
+		'name': 'dav-install',
+		'image': 'owncloudci/php:%s' % phpVersion,
+		'pull': 'always',
+		'commands': [
+			'bash %s/install.sh' % scriptPath
+		]
+	}]
+
+def setupLocalStorage(phpVersion):
+	return [{
+		'name': 'setup-storage',
+		'image': 'owncloudci/php:%s' % phpVersion,
+		'pull': 'always',
+		'environment': {
+			'OC_PASS': '123456',
+		},
+		'commands': [
+			'mkdir -p /drone/src/work/local_storage',
+			'php occ app:enable files_external',
+			'php occ config:system:set files_external_allow_create_new_local --value=true',
+			'php occ config:app:set core enable_external_storage --value=yes',
+			'php occ files_external:create local_storage local null::null -c datadir=/drone/src/work/local_storage',
+			'php occ user:add --password-from-env user1',
+		]
+	}]
+
+def createShare(phpVersion):
+	return [{
+		'name': 'create-share',
+		'image': 'owncloudci/php:%s' % phpVersion,
+		'pull': 'always',
+		'commands': [
+			'curl -k -s -u user1:123456 -X MKCOL "https://server/remote.php/webdav/new_folder"',
+			'curl -k -s -u user1:123456 "https://server/ocs/v2.php/apps/files_sharing/api/v1/shares" --data "path=/new_folder&shareType=0&permissions=15&name=new_folder&shareWith=admin"',
+			'echo -n "PUBLIC_TOKEN=" > .env',
+			'curl -k -s -u user1:123456 "https://server/ocs/v2.php/apps/files_sharing/api/v1/shares" --data "path=/new_folder&shareType=3&permissions=15&name=new_folder" | grep token | cut -d">" -f2 | cut -d"<" -f1 >> .env',
+		]
 	}]
 
 def installCore(version, db, useBundledApp):
