@@ -129,7 +129,7 @@ def afterCoveragePipelines(ctx):
 		sonarAnalysis(ctx)
 	]
 
-def afterPipelines():
+def afterPipelines(ctx):
 	return [
 		notify()
 	]
