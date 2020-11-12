@@ -70,22 +70,22 @@ config = {
 }
 
 def main(ctx):
-  initial = initialPipelines(ctx)
+	initial = initialPipelines(ctx)
 
-  before = beforePipelines(ctx)
-  dependsOn(initial, before)
+	before = beforePipelines(ctx)
+	dependsOn(initial, before)
 
-  coverageTests = coveragePipelines(ctx)
-  if (coverageTests == False):
-  	print('Errors detected in coveragePipelines. Review messages above.')
-	return []
+	coverageTests = coveragePipelines(ctx)
+	if (coverageTests == False):
+		print('Errors detected in coveragePipelines. Review messages above.')
+		return []
 
-  dependsOn(before, coverageTests)
+	dependsOn(before, coverageTests)
 
-  stages = stagePipelines(ctx)
-  if (stages == False):
-	print('Errors detected in stagePipelines. Review messages above.')
-	return []
+	stages = stagePipelines(ctx)
+	if (stages == False):
+		print('Errors detected in stagePipelines. Review messages above.')
+		return []
 
 	dependsOn(before, stages)
 
