@@ -110,14 +110,15 @@ def coveragePipelines(ctx):
 	return jsPipelines + phpunitPipelines + phpintegrationPipelines
 
 def stagePipelines(ctx):
-	# Pipelines that do not produce coverage or other test analysis reports
-	litmusPipelines = litmus()
-	davPipelines = dav()
+	buildPipelines = build()
+	jsPipelines = javascript(ctx)
+	phpunitPipelines = phptests(ctx, 'phpunit')
+	phpintegrationPipelines = phptests(ctx,'phpintegration')
 	acceptancePipelines = acceptance(ctx)
-	if (litmusPipelines == False) or (davPipelines == False) or (acceptancePipelines == False):
+	if (buildPipelines == False) or (jsPipelines == False) or (phpunitPipelines == False) or (phpintegrationPipelines == False) or (acceptancePipelines == False):
 		return False
 
-	return litmusPipelines + davPipelines + acceptancePipelines
+	return buildPipelines + jsPipelines + phpunitPipelines + phpintegrationPipelines + acceptancePipelines
 
 def afterCoveragePipelines(ctx):
 	return [
@@ -242,102 +243,6 @@ def jscodestyle():
 	pipelines.append(result)
 
 	return pipelines
-
-def changelog(ctx):
-	repo_slug = ctx.build.source_repo if ctx.build.source_repo else ctx.repo.slug
-	pipelines = []
-
-	result = {
-		'kind': 'pipeline',
-		'type': 'docker',
-		'name': 'changelog',
-		'clone': {
-			'disable': True,
-		},
-		'steps':
-			[
-				{
-					'name': 'clone',
-					'image': 'plugins/git-action:1',
-					'pull': 'always',
-					'settings': {
-						'actions': [
-							'clone',
-						],
-						'remote': 'https://github.com/%s' % (repo_slug),
-						'branch': ctx.build.source if ctx.build.event == 'pull_request' else 'master',
-						'path': '/drone/src',
-						'netrc_machine': 'github.com',
-						'netrc_username': {
-							'from_secret': 'github_username',
-						},
-						'netrc_password': {
-							'from_secret': 'github_token',
-						},
-					},
-				},
-				{
-					'name': 'generate',
-					'image': 'toolhippie/calens:latest',
-					'pull': 'always',
-					'commands': [
-						'calens >| CHANGELOG.md',
-					],
-				},
-				{
-					'name': 'diff',
-					'image': 'owncloud/alpine:latest',
-					'pull': 'always',
-					'commands': [
-						'git diff',
-					],
-				},
-				{
-					'name': 'output',
-					'image': 'toolhippie/calens:latest',
-					'pull': 'always',
-					'commands': [
-						'cat CHANGELOG.md',
-					],
-				},
-				{
-					'name': 'publish',
-					'image': 'plugins/git-action:1',
-					'pull': 'always',
-					'settings': {
-						'actions': [
-							'commit',
-							'push',
-						],
-						'message': 'Automated changelog update [skip ci]',
-						'branch': 'master',
-						'author_email': 'devops@owncloud.com',
-						'author_name': 'ownClouders',
-						'netrc_machine': 'github.com',
-						'netrc_username': {
-							'from_secret': 'github_username',
-						},
-						'netrc_password': {
-							'from_secret': 'github_token',
-						},
-					},
-					'when': {
-						'ref': {
-							'exclude': [
-								'refs/pull/**',
-							],
-						},
-					},
-				},
-			],
-		'depends_on': [],
-		'trigger': {
-			'ref': [
-				'refs/heads/master',
-				'refs/pull/**',
-			],
-		},
-	}
 
 	pipelines.append(result)
 
@@ -489,260 +394,6 @@ def phan():
 				result['trigger']['ref'].append('refs/heads/%s' % branch)
 
 			pipelines.append(result)
-
-	return pipelines
-
-def litmus():
-	pipelines = []
-
-	if 'litmus' not in config:
-		return pipelines
-
-	default = {
-		'phpVersions': ['7.2', '7.3', '7.4'],
-		'logLevel': '2',
-		'useHttps': True,
-	}
-
-	if 'defaults' in config:
-		if 'litmus' in config['defaults']:
-			for item in config['defaults']['litmus']:
-				default[item] = config['defaults']['litmus'][item]
-
-	litmusConfig = config['litmus']
-
-	if type(litmusConfig) == "bool":
-		if litmusConfig:
-			# the config has 'litmus' true, so specify an empty dict that will get the defaults
-			litmusConfig = {}
-		else:
-			return pipelines
-
-	if len(litmusConfig) == 0:
-		# 'litmus' is an empty dict, so specify a single section that will get the defaults
-		litmusConfig = {'doDefault': {}}
-
-	for category, matrix in litmusConfig.items():
-		params = {}
-		for item in default:
-			params[item] = matrix[item] if item in matrix else default[item]
-
-		for phpVersion in params['phpVersions']:
-			name = 'litmus-php%s' % phpVersion
-			db = 'mariadb:10.2'
-			image = 'owncloud/litmus:latest'
-			environment = {
-				'LITMUS_PASSWORD': 'admin',
-				'LITMUS_USERNAME': 'admin',
-				'TESTS': 'basic copymove props locks http',
-			}
-			litmusCommand = '/usr/local/bin/litmus-wrapper'
-
-			result = {
-				'kind': 'pipeline',
-				'type': 'docker',
-				'name': name,
-				'workspace' : {
-					'base': '/drone',
-					'path': 'src'
-				},
-				'steps':
-					cacheRestore() +
-					composerInstall(phpVersion) +
-					yarnInstall(phpVersion) +
-					installServer(phpVersion, db, params['logLevel'], params['useHttps']) +
-					setupLocalStorage(phpVersion) +
-					fixPermissions(phpVersion, False) +
-					createShare(phpVersion) +
-					owncloudLog('server', 'src') +
-					[
-						{
-							'name': 'old-endpoint',
-							'image': image,
-							'pull': 'always',
-							'environment': environment,
-							'commands': [
-								'source .env',
-								'export LITMUS_URL="https://server/remote.php/webdav"',
-								litmusCommand,
-							]
-						},
-						{
-							'name': 'new-endpoint',
-							'image': image,
-							'pull': 'always',
-							'environment': environment,
-							'commands': [
-								'source .env',
-								'export LITMUS_URL="https://server/remote.php/dav/files/admin"',
-								litmusCommand,
-							]
-						},
-						{
-							'name': 'new-mount',
-							'image': image,
-							'pull': 'always',
-							'environment': environment,
-							'commands': [
-								'source .env',
-								'export LITMUS_URL="https://server/remote.php/dav/files/admin/local_storage/"',
-								litmusCommand,
-							]
-						},
-						{
-							'name': 'old-mount',
-							'image': image,
-							'pull': 'always',
-							'environment': environment,
-							'commands': [
-								'source .env',
-								'export LITMUS_URL="https://server/remote.php/webdav/local_storage/"',
-								litmusCommand,
-							]
-						},
-						{
-							'name': 'new-shared',
-							'image': image,
-							'pull': 'always',
-							'environment': environment,
-							'commands': [
-								'source .env',
-								'export LITMUS_URL="https://server/remote.php/dav/files/admin/new_folder/"',
-								litmusCommand,
-							]
-						},
-						{
-							'name': 'old-shared',
-							'image': image,
-							'pull': 'always',
-							'environment': environment,
-							'commands': [
-								'source .env',
-								'export LITMUS_URL="https://server/remote.php/webdav/new_folder/"',
-								litmusCommand,
-							]
-						},
-						{
-							'name': 'public-share',
-							'image': image,
-							'pull': 'always',
-							'environment': {
-								'LITMUS_PASSWORD': 'admin',
-								'LITMUS_USERNAME': 'admin',
-								'TESTS': 'basic copymove http',
-							},
-							'commands': [
-								'source .env',
-								'export LITMUS_URL=\'https://server/remote.php/dav/public-files/\'$PUBLIC_TOKEN',
-								litmusCommand,
-							]
-						},
-					],
-				'services':
-					databaseService(db) +
-					owncloudService(phpVersion, 'server', '/drone/src', params['useHttps']),
-				'depends_on': [],
-				'trigger': {
-					'ref': [
-						'refs/pull/**',
-						'refs/tags/**'
-					]
-				}
-			}
-
-			pipelines.append(result)
-
-	return pipelines
-
-def dav():
-	pipelines = []
-
-	if 'dav' not in config:
-		return pipelines
-
-	default = {
-		'phpVersions': ['7.2', '7.3', '7.4'],
-		'logLevel': '2'
-	}
-
-	if 'defaults' in config:
-		if 'dav' in config['defaults']:
-			for item in config['defaults']['dav']:
-				default[item] = config['defaults']['dav'][item]
-
-	davConfig = config['dav']
-
-	if type(davConfig) == "bool":
-		if davConfig:
-			# the config has 'dav' true, so specify an empty dict that will get the defaults
-			davConfig = {}
-		else:
-			return pipelines
-
-	if len(davConfig) == 0:
-		# 'dav' is an empty dict, so specify a single section that will get the defaults
-		davConfig = {'doDefault': {}}
-
-	for category, matrix in davConfig.items():
-		params = {}
-		for item in default:
-			params[item] = matrix[item] if item in matrix else default[item]
-
-		for phpVersion in params['phpVersions']:
-			for davType in ['caldav-new', 'caldav-old', 'carddav-new', 'carddav-old']:
-				name = '%s-php%s' % (davType, phpVersion)
-				db = 'mariadb:10.2'
-
-				if (davType == 'caldav-new'):
-					scriptPath = 'apps/dav/tests/ci/caldav'
-
-				if (davType == 'caldav-old'):
-					scriptPath = 'apps/dav/tests/ci/caldav-old-endpoint'
-
-				if (davType == 'carddav-new'):
-					scriptPath = 'apps/dav/tests/ci/carddav'
-
-				if (davType == 'carddav-old'):
-					scriptPath = 'apps/dav/tests/ci/carddav-old-endpoint'
-
-				result = {
-					'kind': 'pipeline',
-					'type': 'docker',
-					'name': name,
-					'workspace' : {
-						'base': '/drone',
-						'path': 'src'
-					},
-					'steps':
-						cacheRestore() +
-						composerInstall(phpVersion) +
-						yarnInstall(phpVersion) +
-						installServer(phpVersion, db, params['logLevel']) +
-						davInstall(phpVersion, scriptPath) +
-						fixPermissions(phpVersion, False) +
-						owncloudLog('server', 'src') +
-						[
-							{
-								'name': 'dav-test',
-								'image': 'owncloudci/php:%s' % phpVersion,
-								'pull': 'always',
-								'commands': [
-									'bash %s/script.sh' % scriptPath,
-								]
-							},
-						],
-					'services':
-						databaseService(db),
-					'depends_on': [],
-					'trigger': {
-						'ref': [
-							'refs/pull/**',
-							'refs/tags/**'
-						]
-					}
-				}
-
-				pipelines.append(result)
 
 	return pipelines
 
@@ -1722,66 +1373,6 @@ def cacheRestore():
 		}
 	}]
 
-def cacheRebuildOnEventPush():
-	return [{
-		'name': 'cache-rebuild',
-		'image': 'plugins/s3-cache:1',
-		'pull': 'always',
-		'settings': {
-			'access_key': {
-				'from_secret': 'cache_s3_access_key'
-			},
-			'endpoint': {
-				'from_secret': 'cache_s3_endpoint'
-			},
-			'mount': [
-				'.cache'
-			],
-			'rebuild': True,
-			'secret_key': {
-				'from_secret': 'cache_s3_secret_key'
-			}
-		},
-		'when': {
-			'event': [
-				'push',
-			],
-			'instance': [
-				'drone.owncloud.services',
-				'drone.owncloud.com'
-			],
-		}
-	}]
-
-def cacheFlushOnEventPush():
-	return [{
-		'name': 'cache-flush',
-		'image': 'plugins/s3-cache:1',
-		'pull': 'always',
-		'settings': {
-			'access_key': {
-				'from_secret': 'cache_s3_access_key'
-			},
-			'endpoint': {
-				'from_secret': 'cache_s3_endpoint'
-			},
-			'flush': True,
-			'flush_age': '14',
-			'secret_key': {
-				'from_secret': 'cache_s3_secret_key'
-			}
-		},
-		'when': {
-			'event': [
-				'push',
-			],
-			'instance': [
-				'drone.owncloud.services',
-				'drone.owncloud.com'
-			],
-		}
-	}]
-
 def composerInstall(phpVersion):
 	return [{
 		'name': 'composer-install',
@@ -1792,71 +1383,6 @@ def composerInstall(phpVersion):
 		},
 		'commands': [
 			'make install-composer-deps'
-		]
-	}]
-
-def vendorbinCodestyle(phpVersion):
-    return [{
-        'name': 'vendorbin-codestyle',
-        'image': 'owncloudci/php:%s' % phpVersion,
-        'pull': 'always',
-        'environment': {
-            'COMPOSER_HOME': '/drone/src/.cache/composer'
-        },
-        'commands': [
-            'make vendor-bin-codestyle'
-        ]
-    }]
-
-def vendorbinCodesniffer(phpVersion):
-	return [{
-		'name': 'vendorbin-codesniffer',
-		'image': 'owncloudci/php:%s' % phpVersion,
-		'pull': 'always',
-		'environment': {
-			'COMPOSER_HOME': '/drone/src/.cache/composer'
-		},
-		'commands': [
-			'make vendor-bin-codesniffer'
-		]
-	}]
-
-def vendorbinPhan(phpVersion):
-	return [{
-		'name': 'vendorbin-phan',
-		'image': 'owncloudci/php:%s' % phpVersion,
-		'pull': 'always',
-		'environment': {
-			'COMPOSER_HOME': '/drone/src/.cache/composer'
-		},
-		'commands': [
-			'make vendor-bin-phan'
-		]
-	}]
-
-def vendorbinPhpstan(phpVersion):
-	return [{
-		'name': 'vendorbin-phpstan',
-		'image': 'owncloudci/php:%s' % phpVersion,
-		'pull': 'always',
-		'environment': {
-			'COMPOSER_HOME': '/drone/src/.cache/composer'
-		},
-		'commands': [
-			'make vendor-bin-phpstan'
-		]
-	}]
-
-def vendorbinBehat():
-	return [{
-		'name': 'vendorbin-behat',
-		'image': 'owncloudci/php:7.4',
-		'pull': 'always',
-		'environment': {
-			'COMPOSER_HOME': '/drone/src/.cache/composer'
-		},
-		'commands': [
-			'make vendor-bin-behat'
 		]
 	}]
 
@@ -1875,16 +1401,6 @@ def yarnInstall(phpVersion):
 		]
 	}]
 
-def davInstall(phpVersion, scriptPath):
-	return [{
-		'name': 'dav-install',
-		'image': 'owncloudci/php:%s' % phpVersion,
-		'pull': 'always',
-		'commands': [
-			'bash %s/install.sh' % scriptPath
-		]
-	}]
-
 def setupLocalStorage(phpVersion):
 	return [{
 		'name': 'setup-storage',
@@ -1900,19 +1416,6 @@ def setupLocalStorage(phpVersion):
 			'php occ config:app:set core enable_external_storage --value=yes',
 			'php occ files_external:create local_storage local null::null -c datadir=/drone/src/work/local_storage',
 			'php occ user:add --password-from-env user1',
-		]
-	}]
-
-def createShare(phpVersion):
-	return [{
-		'name': 'create-share',
-		'image': 'owncloudci/php:%s' % phpVersion,
-		'pull': 'always',
-		'commands': [
-			'curl -k -s -u user1:123456 -X MKCOL "https://server/remote.php/webdav/new_folder"',
-			'curl -k -s -u user1:123456 "https://server/ocs/v2.php/apps/files_sharing/api/v1/shares" --data "path=/new_folder&shareType=0&permissions=15&name=new_folder&shareWith=admin"',
-			'echo -n "PUBLIC_TOKEN=" > .env',
-			'curl -k -s -u user1:123456 "https://server/ocs/v2.php/apps/files_sharing/api/v1/shares" --data "path=/new_folder&shareType=3&permissions=15&name=new_folder" | grep token | cut -d">" -f2 | cut -d"<" -f1 >> .env',
 		]
 	}]
 
