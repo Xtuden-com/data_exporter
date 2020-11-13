@@ -73,19 +73,19 @@ def main(ctx):
 
 	before = beforePipelines()
 
+	stages = stagePipelines(ctx)
+	if (stages == False):
+		print('Errors detected. Review messages above.')
+		return []
+
+	dependsOn(before, stages)
+
 	coverageTests = coveragePipelines(ctx)
 	if (coverageTests == False):
 		print('Errors detected in coveragePipelines. Review messages above.')
 		return []
 
 	dependsOn(before, coverageTests)
-
-	stages = stagePipelines(ctx)
-	if (stages == False):
-		print('Errors detected in stagePipelines. Review messages above.')
-		return []
-
-	dependsOn(before, stages)
 
 	afterCoverageTests = afterCoveragePipelines(ctx)
 	dependsOn(coverageTests, afterCoverageTests)
@@ -111,14 +111,11 @@ def coveragePipelines(ctx):
 
 def stagePipelines(ctx):
 	buildPipelines = build()
-	jsPipelines = javascript(ctx)
-	phpunitPipelines = phptests(ctx, 'phpunit')
-	phpintegrationPipelines = phptests(ctx,'phpintegration')
 	acceptancePipelines = acceptance(ctx)
-	if (buildPipelines == False) or (jsPipelines == False) or (phpunitPipelines == False) or (phpintegrationPipelines == False) or (acceptancePipelines == False):
+	if (buildPipelines == False)  or (acceptancePipelines == False):
 		return False
 
-	return buildPipelines + jsPipelines + phpunitPipelines + phpintegrationPipelines + acceptancePipelines
+	return buildPipelines + acceptancePipelines
 
 def afterCoveragePipelines(ctx):
 	return [
@@ -239,10 +236,6 @@ def jscodestyle():
 
 	for branch in config['branches']:
 		result['trigger']['ref'].append('refs/heads/%s' % branch)
-
-	pipelines.append(result)
-
-	return pipelines
 
 	pipelines.append(result)
 
@@ -601,7 +594,6 @@ def phptests(ctx, testType):
 		'logLevel': '2',
 		'cephS3': False,
 		'scalityS3': False,
-		'externalTypes': ['none'],
 		'extraSetup': [],
 		'extraServices': [],
 		'extraEnvironment': {},
@@ -672,130 +664,96 @@ def phptests(ctx, testType):
 					command = 'make test-php-integration'
 
 			for db in params['databases']:
-				for externalType in params['externalTypes']:
-					keyString = '-' + category if params['includeKeyInMatrixName'] else ''
-					filesExternalType = externalType if externalType != 'none' else ''
-					name = '%s%s-php%s-%s' % (testType, keyString, phpVersion, db.replace(":", ""))
-					maxLength = 50
-					nameLength = len(name)
-					if nameLength > maxLength:
-						print("Error: generated phpunit stage name of length", nameLength, "is not supported. The maximum length is " + str(maxLength) + ".", name)
-						errorFound = True
+				keyString = '-' + category if params['includeKeyInMatrixName'] else ''
+				name = '%s%s-php%s-%s' % (testType, keyString, phpVersion, db.replace(":", ""))
+				maxLength = 50
+				nameLength = len(name)
+				if nameLength > maxLength:
+					print("Error: generated phpunit stage name of length", nameLength, "is not supported. The maximum length is " + str(maxLength) + ".", name)
+					errorFound = True
 
-					if (filesExternalType == ''):
-						# for the regular unit test runs, the clover coverage results are in a file named like:
-						# autotest-clover-sqlite.xml
-						coverageFileNameStart = 'autotest'
-						extraCoverageRenameCommand = []
-						extraCoverage = False
-					else:
-						# for the files-external unit test runs, the clover coverage results are in 2 files named like:
-						# autotest-external-clover-sqlite.xml
-						# autotest-external-clover-sqlite-samba.xml
-						coverageFileNameStart = 'autotest-external'
-						extraCoverageRenameCommand = [
-							'mv tests/output/coverage/%s-clover-%s-%s.xml tests/output/coverage/clover-%s-%s.xml' % (coverageFileNameStart, getDbName(db), externalType, name, externalType)
-						]
-						extraCoverage = True
 
-					result = {
-						'kind': 'pipeline',
-                        'type': 'docker',
-                        'name': name,
-                        'workspace' : {
-                            'base': '/var/www/owncloud',
-                            'path': 'server/apps/%s' % config['app']
-                        },
-                        'steps':
-                            installCore('daily-master-qa', db, False) +
-                            installApp(phpVersion) +
-                            installExtraApps(phpVersion, params['extraApps']) +
-                            setupServerAndApp(phpVersion, params['logLevel']) +
-                            setupCeph(params['cephS3']) +
-                            setupScality(params['scalityS3']) +
-                            params['extraSetup'] +
-                        [
-                            {
-                                'name': '%s-tests' % testType,
-                                'image': 'owncloudci/php:%s' % phpVersion,
-                                'pull': 'always',
-                                'environment': params['extraEnvironment'],
-                                'commands': params['extraCommandsBeforeTestRun'] + [
-                                    command
-                                ]
-                            }
-                        ] + params['extraTeardown'],
-                        'services':
-                            databaseService(db) +
-                            cephService(params['cephS3']) +
-                            scalityService(params['scalityS3']) +
-                            params['extraServices'],
-                        'depends_on': [],
-                        'trigger': {
-                            'ref': [
-                                'refs/pull/**',
-                                'refs/tags/**'
+				result = {
+                    'kind': 'pipeline',
+                    'type': 'docker',
+                    'name': name,
+                    'workspace' : {
+                        'base': '/var/www/owncloud',
+                        'path': 'server/apps/%s' % config['app']
+                    },
+                    'steps':
+                        installCore('daily-master-qa', db, False) +
+                        installApp(phpVersion) +
+                        installExtraApps(phpVersion, params['extraApps']) +
+                        setupServerAndApp(phpVersion, params['logLevel']) +
+                        setupCeph(params['cephS3']) +
+                        setupScality(params['scalityS3']) +
+                        params['extraSetup'] +
+                    [
+                        {
+                            'name': '%s-tests' % testType,
+                            'image': 'owncloudci/php:%s' % phpVersion,
+                            'pull': 'always',
+                            'environment': params['extraEnvironment'],
+                            'commands': params['extraCommandsBeforeTestRun'] + [
+                                command
                             ]
                         }
+                    ] + params['extraTeardown'],
+                    'services':
+                        databaseService(db) +
+                        cephService(params['cephS3']) +
+                        scalityService(params['scalityS3']) +
+                        params['extraServices'],
+                    'depends_on': [],
+                    'trigger': {
+                        'ref': [
+                            'refs/pull/**',
+                            'refs/tags/**'
+                        ]
                     }
+                }
 
-					if params['coverage']:
-						result['steps'].append({
-							'name': 'coverage-rename',
-							'image': 'owncloudci/php:%s' % phpVersion,
-							'pull': 'always',
-							'commands': [
-								'mv tests/output/coverage/%s-clover-%s.xml tests/output/coverage/clover-%s.xml' % (coverageFileNameStart, getDbName(db), name)
-							] + extraCoverageRenameCommand
-						})
-						result['steps'].append({
-							'name': 'coverage-cache-1',
-							'image': 'plugins/s3',
-							'pull': 'always',
-							'settings': {
-								'endpoint': {
-									'from_secret': 'cache_s3_endpoint'
-								},
-								'bucket': 'cache',
-								'source': 'tests/output/coverage/clover-%s.xml'  % (name),
-								'target': '%s/%s/coverage' % (ctx.repo.slug, ctx.build.commit + '-${DRONE_BUILD_NUMBER}'),
-								'path_style': True,
-								'strip_prefix': 'tests/output/coverage',
-								'access_key': {
-									'from_secret': 'cache_s3_access_key'
-								},
-								'secret_key': {
-									'from_secret': 'cache_s3_secret_key'
-								}
+				if params['coverage']:
+					result['steps'].append({
+						'name': 'codecov-upload',
+						'image': 'plugins/codecov:2',
+						'pull': 'always',
+						'settings': {
+							'paths': [
+								'tests/output/clover.xml',
+							],
+							'token': {
+								'from_secret': 'codecov_token'
 							}
-						})
-						if extraCoverage:
-							result['steps'].append({
-								'name': 'coverage-cache-2',
-								'image': 'plugins/s3',
-								'pull': 'always',
-								'settings': {
-									'endpoint': {
-										'from_secret': 'cache_s3_endpoint'
-									},
-									'bucket': 'cache',
-									'source': 'tests/output/coverage/clover-%s-%s.xml'  % (name, externalType),
-									'target': '%s/%s/coverage' % (ctx.repo.slug, ctx.build.commit + '-${DRONE_BUILD_NUMBER}'),
-									'path_style': True,
-									'strip_prefix': 'tests/output/coverage',
-									'access_key': {
-										'from_secret': 'cache_s3_access_key'
-									},
-									'secret_key': {
-										'from_secret': 'cache_s3_secret_key'
-									}
-								}
-							})
+						}
+                    })
+					result['steps'].append({
+                        'name': 'coverage-cache-1',
+                        'image': 'plugins/s3',
+                        'pull': 'always',
+                        'settings': {
+                            'endpoint': {
+                                'from_secret': 'cache_s3_endpoint'
+                            },
+                            'bucket': 'cache',
+                            'source': 'tests/output/clover-%s.xml'  % (name),
+                            'target': '%s/%s/coverage' % (ctx.repo.slug, ctx.build.commit + '-${DRONE_BUILD_NUMBER}'),
+                            'path_style': True,
+                            'strip_prefix': 'tests/output',
+                            'access_key': {
+                                'from_secret': 'cache_s3_access_key'
+                            },
+                            'secret_key': {
+                                'from_secret': 'cache_s3_secret_key'
+                            }
+                        }
+                    })
 
-					for branch in config['branches']:
-						result['trigger']['ref'].append('refs/heads/%s' % branch)
+				for branch in config['branches']:
+					result['trigger']['ref'].append('refs/heads/%s' % branch)
 
-					pipelines.append(result)
+				pipelines.append(result)
 
 	if errorFound:
 		return False
